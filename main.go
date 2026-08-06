@@ -2,20 +2,18 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
-)
-
-const (
-	cacheFile = "known.txt"
-	// 30 days in seconds
-	maxAgeSec = 30 * 24 * 3600
 )
 
 func main() {
@@ -28,12 +26,41 @@ func main() {
 		log.Fatal("UPSTREAM_URL environment variable is required")
 	}
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		handleRequest(w, r, upstream)
 	})
 
-	log.Printf("Starting RSS proxy on :%s to upstream %s\n", port, upstream)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	server := &http.Server{
+		Addr:    ":" + port,
+		Handler: mux,
+	}
+
+	// 1. Channel to catch OS termination signals
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+
+	// 2. Start the HTTP server in a separate goroutine
+	go func() {
+		log.Printf("Starting RSS proxy on :%s to upstream %s\n", port, upstream)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("HTTP server error: %v", err)
+		}
+	}()
+
+	// 3. Block main until SIGINT or SIGTERM is received
+	sig := <-stop
+	log.Printf("Received signal %v. Initiating graceful shutdown...\n", sig)
+
+	// 4. Allow in-flight requests 5 seconds to finish before forcing shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(ctx); err != nil {
+		log.Fatalf("Server forced to shutdown: %v", err)
+	}
+
+	log.Println("Server stopped cleanly.")
 }
 
 func handleRequest(w http.ResponseWriter, r *http.Request, upstream string) {
