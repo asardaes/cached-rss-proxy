@@ -5,7 +5,7 @@ WORKDIR /app
 COPY main.go .
 
 # Initialize a standard module and build a statically linked binary
-RUN go mod init rss-proxy && \
+RUN go mod init cached-rss-proxy && \
     CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o cached-rss-proxy main.go
 
 # Stage 2: Create a minimal final image
@@ -23,4 +23,4 @@ COPY --from=builder /app/cached-rss-proxy .
 ENV PORT=8080
 EXPOSE 8080
 
-CMD ["./cached-rss-proxy"]
+CMD ["/app/cached-rss-proxy"]

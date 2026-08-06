@@ -16,6 +16,12 @@ import (
 	"time"
 )
 
+const (
+	cacheFile = "known.txt"
+	// 30 days in seconds
+	maxAgeSec = 30 * 24 * 3600
+)
+
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -36,11 +42,11 @@ func main() {
 		Handler: mux,
 	}
 
-	// 1. Channel to catch OS termination signals
+	// 1. Listen for termination signals
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
-	// 2. Start the HTTP server in a separate goroutine
+	// 2. Start HTTP server in goroutine
 	go func() {
 		log.Printf("Starting RSS proxy on :%s to upstream %s\n", port, upstream)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -48,11 +54,11 @@ func main() {
 		}
 	}()
 
-	// 3. Block main until SIGINT or SIGTERM is received
+	// 3. Block until SIGINT or SIGTERM is received
 	sig := <-stop
 	log.Printf("Received signal %v. Initiating graceful shutdown...\n", sig)
 
-	// 4. Allow in-flight requests 5 seconds to finish before forcing shutdown
+	// 4. Allow in-flight requests up to 5s to finish writing known.txt
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -64,7 +70,6 @@ func main() {
 }
 
 func handleRequest(w http.ResponseWriter, r *http.Request, upstream string) {
-	// 1. Fetch from the real upstream
 	resp, err := http.Get(upstream)
 	if err != nil {
 		http.Error(w, "Failed to fetch upstream", http.StatusBadGateway)
@@ -78,17 +83,11 @@ func handleRequest(w http.ResponseWriter, r *http.Request, upstream string) {
 		return
 	}
 
-	// 2. Load the current cache from known.txt
 	now := time.Now().Unix()
 	cache := loadCache(now)
-
-	// 3. Filter the RSS feed (this also adds new items to our cache map)
 	filteredBody := filterRSS(body, cache, now)
-
-	// 4. Overwrite known.txt with the updated cache
 	saveCache(cache, now)
 
-	// 5. Respond to the caller
 	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 	w.WriteHeader(resp.StatusCode)
 	w.Write(filteredBody)
@@ -98,7 +97,6 @@ func loadCache(now int64) map[string]int64 {
 	cache := make(map[string]int64)
 	data, err := os.ReadFile(cacheFile)
 	if err != nil {
-		// File might not exist yet, return empty cache
 		return cache
 	}
 
@@ -119,7 +117,6 @@ func loadCache(now int64) map[string]int64 {
 			continue
 		}
 
-		// Only retain entries younger than a month
 		if epoch >= cutoff {
 			cache[parts[1]] = epoch
 		}
@@ -137,12 +134,9 @@ func saveCache(cache map[string]int64, now int64) {
 		}
 	}
 
-	// Overwrite the file on each call
 	_ = os.WriteFile(cacheFile, []byte(sb.String()), 0644)
 }
 
-// filterRSS byte-scans the XML to flawlessly preserve all namespaces and formatting,
-// selectively dropping only the <item>...</item> blocks that are known in the cache.
 func filterRSS(feed []byte, cache map[string]int64, now int64) []byte {
 	var result []byte
 	rest := feed
@@ -150,23 +144,19 @@ func filterRSS(feed []byte, cache map[string]int64, now int64) []byte {
 	for {
 		startIdx := bytes.Index(rest, []byte("<item>"))
 		if startIdx == -1 {
-			// No more items, append whatever is left and stop
 			result = append(result, rest...)
 			break
 		}
 
-		// Append the content leading up to the <item> tag
 		result = append(result, rest[:startIdx]...)
 		rest = rest[startIdx:]
 
 		endIdx := bytes.Index(rest, []byte("</item>"))
 		if endIdx == -1 {
-			// Malformed XML (missing closing tag), append the rest and stop
 			result = append(result, rest...)
 			break
 		}
 
-		// Extract the full <item>...</item> block
 		itemBytes := rest[:endIdx+7]
 		rest = rest[endIdx+7:]
 
@@ -174,17 +164,13 @@ func filterRSS(feed []byte, cache map[string]int64, now int64) []byte {
 		linkEnd := bytes.Index(itemBytes, []byte("</link>"))
 
 		if linkStart != -1 && linkEnd != -1 && linkStart < linkEnd {
-			// Extract just the link URL
 			link := string(bytes.TrimSpace(itemBytes[linkStart+6 : linkEnd]))
 
 			if _, exists := cache[link]; !exists {
-				// The item is NEW. Add to cache and keep the item block.
 				cache[link] = now
 				result = append(result, itemBytes...)
 			}
-			// If it DOES exist, we simply do nothing (effectively dropping it).
 		} else {
-			// If we couldn't find a <link>, play it safe and keep the item
 			result = append(result, itemBytes...)
 		}
 	}
