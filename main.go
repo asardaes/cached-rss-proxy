@@ -85,8 +85,8 @@ func handleRequest(w http.ResponseWriter, r *http.Request, upstream string) {
 
 	now := time.Now().Unix()
 	cache := loadCache(now)
-	filteredBody := filterRSS(body, cache, now)
-	saveCache(cache, now)
+	filteredBody, anyAdded := filterRSS(body, cache, now)
+	saveCache(cache, now, anyAdded)
 
 	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 	w.WriteHeader(resp.StatusCode)
@@ -124,21 +124,27 @@ func loadCache(now int64) map[string]int64 {
 	return cache
 }
 
-func saveCache(cache map[string]int64, now int64) {
+func saveCache(cache map[string]int64, now int64, anyAdded bool) {
 	var sb strings.Builder
+	var anyRemoved bool
 	cutoff := now - maxAgeSec
 
 	for link, epoch := range cache {
 		if epoch >= cutoff {
 			sb.WriteString(fmt.Sprintf("%d\t%s\n", epoch, link))
+		} else {
+			anyRemoved = true
 		}
 	}
 
-	_ = os.WriteFile(cacheFile, []byte(sb.String()), 0644)
+	if anyAdded || anyRemoved {
+		_ = os.WriteFile(cacheFile, []byte(sb.String()), 0644)
+	}
 }
 
-func filterRSS(feed []byte, cache map[string]int64, now int64) []byte {
+func filterRSS(feed []byte, cache map[string]int64, now int64) ([]byte, bool) {
 	var result []byte
+	var anyAdded bool
 	rest := feed
 
 	for {
@@ -169,11 +175,12 @@ func filterRSS(feed []byte, cache map[string]int64, now int64) []byte {
 			if _, exists := cache[link]; !exists {
 				cache[link] = now
 				result = append(result, itemBytes...)
+				anyAdded = true
 			}
 		} else {
 			result = append(result, itemBytes...)
 		}
 	}
 
-	return result
+	return result, anyAdded
 }
